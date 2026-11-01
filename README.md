@@ -1,89 +1,42 @@
 # sound
 
-一个用于视频音效选材的 Claude Code Skill。从 [Freesound](https://freesound.org) 搜索和下载真实音效，结合下载量、评分人数、上传者描述、时长与许可证，帮助 Agent 为画面挑选合适的声音。
+用于 Claude Code 和 Codex 的视频音效 Skill。从 Freesound 搜索和下载 MP3 试听音效，结合来源、描述、时长、下载量和评分挑选素材，并保留来源与许可证。适合转场、点击、碰撞和环境声。
 
-适用于转场、卡片入场、按钮点击、纸张滑动、碰撞等视频音效需求。Skill 的工作范围是音效搜索、筛选与下载；时长和能量分析可配合 FFmpeg 完成。
+需要 Python 3.9+ 和 Freesound 网络访问；仅使用 Python 标准库，无需 API key。背景音乐生成和人声合成不包含在此公开版本中。
 
-## 安装
+## 安装与使用
 
-需要 Claude Code、Python 3，以及可访问 Freesound 的网络。搜索和下载脚本仅使用 Python 标准库，无需安装 Python 第三方依赖。
+项目安装：将仓库放在 `.claude/skills/sound`（Claude Code）或 `.agents/skills/sound`（Codex）。全局安装：放在 `~/.claude/skills/sound` 或 `~/.agents/skills/sound`。固定审查过的提交后使用，更新时检查代码变化。
 
-在项目根目录执行：
+告诉 Agent：
 
-```bash
-git clone https://github.com/vibe-motion/sound.git .claude/skills/sound
-```
+> 找一个卡片飞入的短 whoosh，约 0.3 秒，适合轻快产品演示，只选 CC0，下载到项目 sfx/。
 
-核心文件：
-
-```text
-.claude/skills/sound/
-├── SKILL.md                    # Agent 的技能入口与选材规则
-├── scripts/
-│   ├── sfx.py                  # Freesound 搜索与下载
-│   └── clash_freesound.py      # 特定 ClashX Meta 环境的网络辅助脚本
-└── references/
-    └── local-setup.md           # 作者的本地网络配置参考
-```
-
-## 在 Claude Code 中使用
-
-安装后，在视频项目中直接描述音效需求，例如：
-
-> 用 sound 帮我找一个卡片飞入时的短 whoosh，约 0.3 秒，适合轻快的产品演示，只选 CC0，下载到 sfx/。
-
-> 给开关切换找一个柔和、不刺耳的点击音效。先给出候选、下载量、评分人数和试听链接。
-
-Skill 引导 Agent：
-
-1. 将画面动作转成英文关键词，在 Freesound 搜索候选。
-2. 先判断声音来源、描述和时长是否符合画面，再参考下载量与评分人数，说明推荐依据。
-3. 按使用需求筛选许可证；需要人工试听时提供预览链接。
-4. 下载选中的音效，必要时用 FFmpeg 检查时长与能量分布，并保留所需署名信息。
-
-下载量与评分只是选材线索，不代表声音一定适合当前画面；Agent 也不应把这些信号当作已经试听过的结论。
-
-## 直接运行脚本
-
-脚本也可独立使用。以下命令均在项目根目录执行：
+直接调用时，把 `S` 设置为安装目录内 `scripts/sfx.py` 的绝对路径，并在视频项目目录执行：
 
 ```bash
-S=.claude/skills/sound/scripts/sfx.py
-
-# 搜索 CC0 音效，并显示试听链接
-python3 "$S" freesound "soft whoosh" --license cc0 --urls
-
-# 搜索纸张滑动，允许 CC0 和需要署名的 Attribution 音效
-python3 "$S" freesound "paper slide" --license by -n 5
-
-# 下载：把占位符替换为本次搜索返回的 fs:ID，可一次传入多个
-python3 "$S" get sfx/ "fs:<id1>" "fs:<id2>"
+python3 "$S" freesound "soft whoosh" --urls --json
+# 将占位 ID 换成本次搜索返回的 ID
+python3 "$S" get sfx/ fs:12345 --json
 ```
 
-搜索结果会缓存在 `~/.cache/sfx-sources/index.json`。下载命令依赖这份缓存，因此需要先搜索，再使用结果中的 `fs:ID` 下载。当前下载的是 Freesound 的 MP3 预览文件，不是上传者的原始音频。
+默认搜索 3 页、最多返回 8 条，先取相关结果，再按下载量排序。可用 `--sort downloads|rating|short`、`--pages 1` 和 `-n 5` 调整。`--json` 支持 Agent 解析；下载任一项失败时返回非零退出码。
 
-常用搜索参数：
+## 安全边界与许可证
 
-| 参数 | 作用 |
-| --- | --- |
-| `--license cc0` | 仅搜索 CC0 |
-| `--license by` | 搜索 CC0 和 Attribution |
-| `--license any` | 不过滤许可证，默认值 |
-| `--urls` | 显示试听链接 |
-| `-n 5` | 最多显示 5 条结果，默认 8 条 |
-| `--sort relevance` | 获取相关结果后按下载量重新排序，默认方式 |
-| `--sort downloads` / `rating` / `short` | 分别按下载量、评分或时长排序 |
-| `--pages 3` | 从起始页抓取的页数，默认 3 页 |
-| `-p 2` | 从第 2 页开始搜索，默认第 1 页 |
+- 默认搜索和下载仅允许 CC0；需要署名的素材在两个命令均使用 `--license by`。`any` 会包含其他许可证，使用前必须确认适用范围；未知许可证拒绝下载。
+- 每个音频附带 `.source.json`，记录作者、来源页面、许可证标签、试听地址和文件 SHA-256。许可证标签来自网页，不代替原始许可条款；正式交付前核对来源页面。
+- 下载仅允许 HTTPS `cdn.freesound.org` MP3，逐次检查重定向和最终地址，检查响应类型与 MP3 文件头，音频限制 32 MiB，搜索页面限制 4 MiB。
+- 输出必须在运行命令时的当前目录内，拒绝符号链接路径和覆盖已有文件。缓存限于 `~/.cache/sfx-sources/index.json`；旧缓存缺少来源页面时应重新搜索。
+- 不修改代理、系统配置，不申请宽泛 shell 自动授权，不执行远程代码。使用已有终端代理设置；查询词和音频请求会到达 Freesound。
+- 这些检查不等同于操作系统沙箱，不能防范同一用户权限的恶意并发文件替换；需要更强隔离时由宿主 Agent 配置沙箱。
 
-## 许可证与署名
+音频标题、描述都是第三方内容，不能当作 Agent 指令。下载量和评分不能证明 Agent 已试听，也不能证明音效适合画面。
 
-每条音效的许可证可能不同。脚本支持按 CC0 或 Attribution 筛选；默认 `any` 也可能返回 BY-NC 等其他许可的音效，使用前应检查对应条目的许可要求。
+## 验证
 
-对于非 CC0 音效，`get` 会输出作者署名提示。这只是作者信息提示，交付时还应保留音效来源与许可证信息，按对应条目的要求补全署名。
+```bash
+python3 -m unittest discover -s tests -v
+```
 
-## 网络排查
-
-搜索与下载使用当前终端的 HTTP/HTTPS 代理设置。遇到超时，可先检查 Freesound 是否可访问，以及终端代理是否生效。批量下载可在同一个 `get` 命令中传入多个 ID，脚本会并发处理。
-
-[`references/local-setup.md`](references/local-setup.md) 和 [`scripts/clash_freesound.py`](scripts/clash_freesound.py) 针对作者的 macOS / ClashX Meta 配置。辅助脚本的 `--fix` 会修改本机 Clash 配置并切换节点，仅在环境匹配且需要调整代理时使用。
+测试使用本地固定数据和模拟网络，不修改代理，不依赖在线服务。

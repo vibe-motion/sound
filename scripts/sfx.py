@@ -7,7 +7,7 @@ Uses the shell's http(s)_proxy settings.
                                        relevance (default) is re-ranked by downloads across K pages
   sfx.py get <out_dir> <key>...        keys: fs:<id>
 """
-import argparse, html, json, re, sys, time, urllib.parse, urllib.request
+import argparse, hashlib, html, json, os, re, sys, tempfile, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -20,20 +20,80 @@ FS_SORT = {"downloads": "Downloads (most first)", "rating": "Rating (highest fir
            "relevance": "Automatic by relevance", "short": "Duration (shortest first)"}
 
 
-def fetch(url, timeout=60, tries=3):
+def validate_url(url, hosts):
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or parsed.hostname not in hosts
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in (None, 443)):
+        raise ValueError("URL must use HTTPS on an allowed Freesound host")
+    return url
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, hosts):
+        self.hosts = hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_url(newurl, self.hosts)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch(url, timeout=60, tries=3, audio=False):
+    hosts = {"cdn.freesound.org"} if audio else {"freesound.org", "www.freesound.org"}
+    validate_url(url, hosts)
+    opener = urllib.request.build_opener(SafeRedirect(hosts))
+    limit = 32 * 1024 * 1024 if audio else 4 * 1024 * 1024
     for n in range(tries):
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
-                return r.read()
-        except Exception as e:
+            with opener.open(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+                validate_url(r.geturl(), hosts)
+                if audio and r.headers.get_content_type() not in {
+                        "audio/mpeg", "audio/mp3", "application/octet-stream"}:
+                    raise ValueError("Expected an MP3 preview response")
+                data = r.read(limit + 1)
+                if len(data) > limit:
+                    raise ValueError("Response exceeds size limit")
+                if audio and not (data.startswith(b"ID3") or
+                                  (len(data) > 1 and data[0] == 255 and data[1] & 224 == 224)):
+                    raise ValueError("Response has no MP3 header")
+                return data
+        except OSError:
             if n == tries - 1:
-                raise e if isinstance(e, OSError) else OSError(repr(e))
+                raise
             time.sleep(1 + n)
 
 
+def project_path(path):
+    root = Path.cwd().resolve()
+    target = Path(os.path.abspath(path))
+    if not target.is_relative_to(root):
+        raise ValueError("Output must be inside the current project directory")
+    for part in (target, *target.parents):
+        if part.is_symlink():
+            raise ValueError("Symlinks are not allowed in output paths")
+        if part == root:
+            break
+    return target
+
+
+def write_new(path, data):
+    # Publish a complete file atomically, without replacing files or symlinks.
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temp = Path(stream.name)
+        try:
+            stream.write(data)
+            stream.close()
+            os.link(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+
 def load_index():
+    if CACHE.is_symlink() or INDEX.is_symlink():
+        raise ValueError("Symlinked cache is not supported")
     try:
-        return json.loads(INDEX.read_text())
+        value = json.loads(INDEX.read_text())
+        return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -42,11 +102,23 @@ def save_index(rows):
     CACHE.mkdir(parents=True, exist_ok=True)
     idx = load_index()
     idx.update({r["key"]: r for r in rows})
-    INDEX.write_text(json.dumps(idx, ensure_ascii=False))
+    if CACHE.is_symlink() or INDEX.is_symlink():
+        raise ValueError("Symlinked cache is not supported")
+    with tempfile.NamedTemporaryFile(mode="w", dir=CACHE, delete=False) as stream:
+        temp = Path(stream.name)
+        try:
+            json.dump(idx, stream, ensure_ascii=False)
+            stream.close()
+            temp.replace(INDEX)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def show(rows, a, lic=False, hint=""):
     save_index(rows)
+    if a.json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
     for r in rows:
         print("\t".join([r["key"], r["title"], r["dur"]] + ([r["stats"]] if "stats" in r else []) + [r["license"]] * lic + ([r["desc"]] if r.get("desc") else []) + [r["preview"]] * a.urls))
     if not rows:
@@ -70,7 +142,12 @@ def freesound(a):
         rn = re.search(r'bw-rating__count[^>]*>\((\d+)\)', blk)
         desc = re.search(r'<div class="max-h-60px[^"]*"\s*>\s*(.*?)\s*</div>', blk, re.S)
         sid, user, dl = g("sound-id"), g("username"), int(g("num-downloads") or 0)
-        rows.append({"key": f"fs:{sid}", "title": html.unescape(g("title")), "dur": f"{float(g('duration') or 0):.1f}s",
+        if not re.fullmatch(r"[0-9]+", sid):
+            continue
+        license_name = FS_LIC_SHORT.get(lic.group(1), lic.group(1)) if lic else "?"
+        if a.license != "any" and license_name not in ({"CC0"} if a.license == "cc0" else {"CC0", "BY"}):
+            continue
+        rows.append({"source": f"https://freesound.org/people/{urllib.parse.quote(user, safe='')}/sounds/{sid}/", "key": f"fs:{sid}", "title": html.unescape(g("title")), "dur": f"{float(g('duration') or 0):.1f}s",
                      "author": user, "license": FS_LIC_SHORT.get(lic.group(1), lic.group(1)) if lic else "?", "preview": g("mp3").replace("-lq.mp3", "-hq.mp3"),
                      "url": g("mp3").replace("-lq.mp3", "-hq.mp3"), "downloads": dl,
                      "stats": f"↓{dl} ★{rt[1]}({rn[1]})" if rt and rn else f"↓{dl} ★-",
@@ -82,51 +159,81 @@ def freesound(a):
 
 
 def get(a):
-    out = Path(a.out_dir)
+    out = project_path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     idx = load_index()
 
     def one(key):
-        src, sep, ref = key.partition(":")
-        if src != "fs" or not sep:
-            return key, None, "unsupported key — only fs: keys are supported"
+        if not re.fullmatch(r"fs:[0-9]+", key):
+            raise ValueError("Expected fs:<numeric id>")
         r = idx.get(key)
-        if not r:
-            return key, None, "unknown key — search first"
-        slug = re.sub(r"[^\w]+", "-", r["title"]).strip("-")[:40]
-        dst = out / f"{src}_{ref}{'_' + slug if slug else ''}{Path(urllib.parse.urlparse(r['url']).path).suffix}"
-        if not dst.exists():
-            tmp = dst.with_suffix(dst.suffix + ".part")
-            tmp.write_bytes(fetch(r["url"], timeout=300))
-            tmp.rename(dst)
-        lic = r.get("license", "CC0")
-        return key, dst, f"credit {r.get('author', '?')}" if lic != "CC0" else None
+        if not isinstance(r, dict):
+            raise ValueError("Unknown key — search first")
+        lic = r.get("license", "?")
+        allowed = {"cc0": {"CC0"}, "by": {"CC0", "BY"}}
+        if a.license in allowed and lic not in allowed[a.license]:
+            raise ValueError("License excluded; explicitly choose --license by or any if appropriate")
+        if lic == "?":
+            raise ValueError("Unknown license; verify the source before downloading")
+        url = r["url"]
+        validate_url(url, {"cdn.freesound.org"})
+        if not urllib.parse.urlsplit(url).path.endswith(".mp3"):
+            raise ValueError("Only MP3 previews are supported")
+        source = r.get("source", "")
+        validate_url(source, {"freesound.org"})
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", r.get("title", "")).strip("-")[:40]
+        dst = project_path(out / f"fs_{key[3:]}{'_' + slug if slug else ''}.mp3")
+        manifest = project_path(dst.with_suffix(".source.json"))
+        if dst.exists() or manifest.exists():
+            raise ValueError("Output already exists; choose another directory or remove it explicitly")
+        data = fetch(url, timeout=300, audio=True)
+        record = {k: r.get(k) for k in ("key", "title", "author", "license", "source")}
+        record.update(preview=url, file=dst.name, sha256=hashlib.sha256(data).hexdigest())
+        # Reserve metadata first; a competing invocation cannot overwrite this pair.
+        write_new(manifest, json.dumps(record, ensure_ascii=False, indent=2).encode())
+        try:
+            write_new(dst, data)
+        except Exception:
+            manifest.unlink()
+            raise
+        return {"key": key, "file": str(dst), "metadata": str(manifest), "license": lic}
 
     def safe(key):
         try:
             return one(key)
-        except Exception as e:  # one bad file shouldn't sink the batch
-            return key, None, repr(e)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            return {"key": key, "error": str(e)}
 
-    # Freesound caps ~80 KB/s per connection, so parallelism is the only speed lever.
     with ThreadPoolExecutor(6) as ex:
-        for key, dst, note in ex.map(safe, a.keys):
-            print(f"FAIL {key}: {note}" if not dst else f"{dst.name}  [{note}]" if note else dst.name)
+        results = list(ex.map(safe, dict.fromkeys(a.keys)))
+    if a.json:
+        print(json.dumps(results, ensure_ascii=False))
+    else:
+        for result in results:
+            print(f"FAIL {result['key']}: {result['error']}" if "error" in result else
+                  f"{result['file']} [{result['license']}; metadata: {result['metadata']}]")
+    if any("error" in result for result in results):
+        raise SystemExit(1)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
-    f = sp.add_parser("freesound"); f.add_argument("query"); f.add_argument("--license", choices=FS_LICENSE, default="any")
+    f = sp.add_parser("freesound"); f.add_argument("query"); f.add_argument("--license", choices=FS_LICENSE, default="cc0")
     f.add_argument("--sort", choices=FS_SORT, default="relevance"); f.add_argument("-n", type=int, default=8); f.add_argument("--urls", action="store_true")
     f.add_argument("-p", "--page", type=int, default=1)
     f.add_argument("--pages", type=int, default=3, help="relevance pages (15 each) to rank by downloads"); f.set_defaults(fn=freesound)
     g = sp.add_parser("get"); g.add_argument("out_dir"); g.add_argument("keys", nargs="+"); g.set_defaults(fn=get)
+    g.add_argument("--license", choices=FS_LICENSE, default="cc0")
+    for parser in (f, g):
+        parser.add_argument("--json", action="store_true", help="machine-readable results")
     a = ap.parse_args()
+    if a.cmd == "freesound" and not (1 <= a.pages <= 5 and 1 <= a.page <= 100 and 1 <= a.n <= 100):
+        ap.error("pages must be 1–5, page and n must be 1–100")
     try:
         a.fn(a)
-    except OSError as e:
-        sys.exit(f"network error: {getattr(e, 'reason', e)}" + (" — try clash_freesound.py --fix" if a.cmd == "freesound" else ""))
+    except (OSError, ValueError) as e:
+        sys.exit(f"error: {e}")
 
 
 if __name__ == "__main__":
