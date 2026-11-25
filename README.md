@@ -12,6 +12,10 @@
 
 获取方式与安装说明见 [B 站充电动态](https://www.bilibili.com/opus/1270901129543155716)。
 
+## 用户评价
+
+<img src="assets/user-review-1.png" alt="用户评价：使用 sound skill 小红书起号破 10 万浏览并接到商单" width="360" />
+
 ## 安装
 
 需要 Claude Code、Python 3，以及可访问 Freesound 的网络。搜索和下载脚本仅使用 Python 标准库，无需安装 Python 第三方依赖。
