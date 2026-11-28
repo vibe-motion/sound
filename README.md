@@ -69,10 +69,6 @@ python3 "$S" get sfx/ "fs:<id1>" "fs:<id2>"
 
 [`references/local-setup.md`](references/local-setup.md) 和 [`scripts/clash_freesound.py`](scripts/clash_freesound.py) 针对作者的 macOS / ClashX Meta 配置。辅助脚本的 `--fix` 会修改本机 Clash 配置并切换节点，仅在环境匹配且需要调整代理时使用。
 
-## 用户评价
-
-<img src="assets/user-review-1.png" alt="用户分享使用 sound Skill 制作小红书视频的经历" width="360" />
-
 ## 满血版 Sound Skill
 
 完整包包含音效素材检索、程序化音频制作和混音处理三个 Skill。获取方式与安装步骤见 [B 站充电动态](https://www.bilibili.com/opus/1270901129543155716)。
